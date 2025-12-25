@@ -1,0 +1,5 @@
+{
+  "name": "Go Memory Visualizer",
+  "description": "An interactive and educational visualization of the Go memory allocator (TCMalloc-inspired), showing MCaches, MCentrals, and the MHeap hierarchy.",
+  "requestFramePermissions": []
+}
