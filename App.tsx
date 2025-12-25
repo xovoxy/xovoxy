@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { Trash2, Loader2, Zap, Code2, Sparkles, ArrowDownNarrowWide } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
-import { SIZE_CLASSES, MSpan, AllocatorState, AllocStrategy, MAX_SMALL_OBJECT, AllocEvent } from './types';
+import { SIZE_CLASSES, MSpan, AllocatorState, MAX_SMALL_OBJECT, PAGE_SIZE, AllocEvent } from './types';
 import AllocatorView from './components/AllocatorView';
 import LogPanel from './components/LogPanel';
 import Header from './components/Header';
@@ -12,25 +12,19 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const DEFAULT_CODE = `package main
 
-var globalVar int = 100 // 全局变量，在静态数据段
-
 func main() {
-    localX := 10 // 局部变量，在栈
+    // 触发逃逸到堆
+    a := make([]int, 5) 
     
-    p := escape() // p 逃逸到堆
+    // 再次触发，演示 MCentral 的批发与分配
+    b := make([]int, 5)
     
-    _ = localX
-    _ = p
-}
-
-func escape() *int {
-    y := 42
-    return &y
+    _ = a; _ = b
 }`;
 
 const createSpan = (sizeClass: number): MSpan => {
   const objSize = SIZE_CLASSES[sizeClass];
-  const totalObjects = Math.max(1, Math.floor(8192 / objSize));
+  const totalObjects = Math.max(1, Math.floor(PAGE_SIZE / objSize));
   return {
     id: Math.random().toString(36).substr(2, 5).toUpperCase(),
     sizeClass,
@@ -42,19 +36,20 @@ const createSpan = (sizeClass: number): MSpan => {
 };
 
 const INITIAL_STATE: AllocatorState = {
-  mCache: { spans: SIZE_CLASSES.map(() => null) },
+  mCache: { spans: SIZE_CLASSES.map(() => null), tinyOffset: 0 },
   mCentrals: SIZE_CLASSES.map((size, idx) => ({
     sizeClass: idx,
     objectSize: size,
-    nonEmptySpans: idx < 8 ? [createSpan(idx), createSpan(idx)] : [],
+    nonEmptySpans: [], // 初始设为空，强制从 MHeap 批发
     emptySpans: []
   })),
   mHeap: {
     freeSpans: [],
     totalMemory: 1024 * 1024 * 1024,
-    usedMemory: 1024 * 1024 * 8 
+    usedMemory: 0,
+    activeObjectMemory: 0
   },
-  logs: ['系统准备就绪。', '[Runtime] 初始栈空间 2KB 已就绪。'],
+  logs: ['[System] Go Runtime Initialized.', '[Memory] MHeap Arena ready.'],
   stackObjects: [],
   staticObjects: []
 };
@@ -77,131 +72,137 @@ const App: React.FC = () => {
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   const runAllocationAction = async (event: AllocEvent) => {
-    const { size, hasPointer, name, reason, type, escapes, location } = event;
+    let { size, hasPointer, name, reason, type, escapes, location } = event;
     setIsAllocating(true);
-    setCurrentEvent(event);
     
-    addLog(`[COMPILER] 扫描变量 "${name}" -> 类型: ${type}`);
-
     if (location === 'data') {
-      addLog(`[ALLOCATOR: DATA SEGMENT] 变量 "${name}" 是全局变量。原因: ${reason}`);
-      addLog(`[ALLOCATOR: DATA SEGMENT] 静态分配至可执行文件的 .data/.bss 段，程序生命周期内常驻。`);
+      addLog(`[DATA] "${name}" -> 分配至静态数据区。`);
       setActiveStep('data');
-      setState(prev => ({
-        ...prev,
-        staticObjects: [...prev.staticObjects, { id: Math.random().toString(36).substr(2,4), name: name, size }]
-      }));
-      await sleep(600);
-      setActiveStep(null);
-    } else if (!escapes) {
-      addLog(`[ALLOCATOR: STACK] 变量 "${name}" 属于局部非逃逸变量。原因: ${reason}`);
-      addLog(`[ALLOCATOR: STACK] 在 Goroutine 栈帧中按序压入，无需 GC 处理。`);
+      setState(prev => ({ ...prev, staticObjects: [...prev.staticObjects, { id: Math.random().toString(36).substr(2,4), name, size }] }));
+      await sleep(500);
+    } else if (location === 'stack' && !escapes) {
+      addLog(`[STACK] "${name}" -> 压入栈帧。`);
       setActiveStep('stack');
-      setState(prev => ({
-        ...prev,
-        stackObjects: [...prev.stackObjects, { id: Math.random().toString(36).substr(2,4), name: name, size }]
-      }));
-      await sleep(600);
-      setActiveStep(null);
+      setState(prev => ({ ...prev, stackObjects: [...prev.stackObjects, { id: Math.random().toString(36).substr(2,4), name, size }] }));
+      await sleep(500);
     } else {
-      addLog(`[COMPILER] 变量 "${name}" 触发逃逸: ${reason}`);
-      addLog(`[TRANSITION] 申请堆空间分流...`);
-      
-      setActiveStep('stack');
-      await sleep(200);
+      addLog(`[COMPILER] "${name}" (${size}B) 触发堆逃逸。`);
+      addLog(`  原因: ${reason}`);
       setActiveStep('escape-animation');
-      await sleep(300);
+      await sleep(500);
 
       if (size > MAX_SMALL_OBJECT) {
-        addLog(`[ALLOCATOR: MHEAP] 变量 "${name}" (${size}B) 为大对象，直通 MHeap Arena。`);
+        const pagesNeeded = Math.ceil(size / PAGE_SIZE);
+        const actualAlloc = pagesNeeded * PAGE_SIZE;
+        addLog(`[MHEAP] 大对象分配: 直接从 Arena 申请 ${pagesNeeded} 个 Page。`);
         setActiveStep('mheap');
-        await sleep(500);
-        setState(prev => ({ ...prev, mHeap: { ...prev.mHeap, usedMemory: prev.mHeap.usedMemory + size } }));
+        setState(prev => ({
+          ...prev,
+          mHeap: { 
+            ...prev.mHeap, 
+            usedMemory: prev.mHeap.usedMemory + actualAlloc,
+            activeObjectMemory: prev.mHeap.activeObjectMemory + size
+          }
+        }));
+        await sleep(800);
       } else {
-        const scIndex = SIZE_CLASSES.findIndex(s => s >= size);
-        const targetSize = SIZE_CLASSES[scIndex];
+        let scIndex = SIZE_CLASSES.findIndex(s => s >= size);
+        let classSize = SIZE_CLASSES[scIndex];
+        
+        const isTiny = size < 16 && !hasPointer;
+        if (isTiny) { scIndex = 1; classSize = 16; }
+
+        const waste = classSize - size;
+        setCurrentEvent({ ...event, classSize, waste });
         setActiveSizeClass(scIndex);
         
-        addLog(`[ALLOCATOR: MCACHE] 尝试在 P 的本地 MCache 分配 (SizeClass ${scIndex})。`);
+        // 1. 检查 MCache
         setActiveStep('mcache');
-        await sleep(300);
-        
-        if (!state.mCache.spans[scIndex] || state.mCache.spans[scIndex]!.freeObjects === 0) {
-          addLog(`[ALLOCATOR: MCACHE] 本地缓存不足，请求 MCentral 批量补充。`);
-          setActiveStep('mcentral');
-          await sleep(400);
-          
-          setState(prev => {
-            if (prev.mCentrals[scIndex].nonEmptySpans.length === 0) {
-               addLog(`[ALLOCATOR: MCENTRAL] 中央池已干涸，向 MHeap 批发内存页并切割。`);
-               const newCentrals = [...prev.mCentrals];
-               newCentrals[scIndex] = { ...newCentrals[scIndex], nonEmptySpans: [createSpan(scIndex)] };
-               return { ...prev, mCentrals: newCentrals };
-            }
-            return prev;
-          });
+        addLog(`[MCACHE] 检查本地规格槽位 C${scIndex}...`);
+        await sleep(500);
 
-          addLog(`[ALLOCATOR: MCENTRAL] 成功将一个 MSpan 划拨给 MCache。`);
+        if (!state.mCache.spans[scIndex] || state.mCache.spans[scIndex]!.freeObjects === 0) {
+          addLog(`[MCACHE] 本地无可用 Span。请求 MCentral 补充。`);
+          setActiveStep('mcentral');
+          await sleep(600);
+
+          // 2. 检查 MCentral
+          if (state.mCentrals[scIndex].nonEmptySpans.length === 0) {
+            addLog(`[MCENTRAL] 中央池已空！启动【批发逻辑】。`);
+            addLog(`[SYSCALL] MCentral 向 MHeap 申请 8KB 物理页并切割为 MSpan。`);
+            
+            // 触发 MHeap -> MCentral 动画
+            setActiveStep('mheap-to-mcentral');
+            await sleep(1500); // 延长动画时间
+            
+            setState(prev => {
+              const newCentrals = [...prev.mCentrals];
+              // 模拟批发到一个新的 Span
+              newCentrals[scIndex] = { ...newCentrals[scIndex], nonEmptySpans: [createSpan(scIndex)] };
+              return { 
+                ...prev, 
+                mCentrals: newCentrals,
+                mHeap: { ...prev.mHeap, usedMemory: prev.mHeap.usedMemory + PAGE_SIZE }
+              };
+            });
+            addLog(`[MHEAP] 已划拨 1 个页面。MCentral 规格 ${scIndex} 链表已更新。`);
+            await sleep(600);
+            setActiveStep('mcentral');
+            await sleep(400);
+          }
+
+          // 3. 从 MCentral 移动到 MCache
+          addLog(`[REFILL] 从 MCentral 迁出一个 MSpan 给本地 MCache。`);
           setActiveStep('refill-mcache');
-          await sleep(300);
-          
+          await sleep(800);
           setState(prev => {
             const newCentrals = [...prev.mCentrals];
-            const spans = [...newCentrals[scIndex].nonEmptySpans];
-            if (spans.length === 0) return prev;
-            const spanToMove = spans.shift()!;
-            newCentrals[scIndex] = { ...newCentrals[scIndex], nonEmptySpans: spans };
-            const newMCacheSpans = [...prev.mCache.spans];
-            newMCacheSpans[scIndex] = spanToMove;
-            return { ...prev, mCentrals: newCentrals, mCache: { spans: newMCacheSpans } };
+            const spanToMove = newCentrals[scIndex].nonEmptySpans.shift()!;
+            const newCacheSpans = [...prev.mCache.spans];
+            newCacheSpans[scIndex] = spanToMove;
+            return { ...prev, mCentrals: newCentrals, mCache: { ...prev.mCache, spans: newCacheSpans } };
           });
+          await sleep(400);
+          setActiveStep('mcache');
         }
 
-        addLog(`[ALLOCATOR: MCACHE] 成功获取空闲 Slot，完成分配。`);
+        // 4. 执行分配
+        addLog(`[SUCCESS] 变量 "${name}" 已在规格槽位中就绪。`);
         setActiveStep('allocating-slot');
         setState(prev => {
-          const newMCacheSpans = [...prev.mCache.spans];
-          const span = newMCacheSpans[scIndex];
-          if (!span) return prev;
+          const newCacheSpans = [...prev.mCache.spans];
+          const span = newCacheSpans[scIndex]!;
           const freeIdx = span.objects.indexOf(false);
           if (freeIdx !== -1) {
-            const newObjs = [...span.objects];
-            newObjs[freeIdx] = true;
-            newMCacheSpans[scIndex] = { ...span, objects: newObjs, freeObjects: span.freeObjects - 1 };
+            span.objects[freeIdx] = true;
+            span.freeObjects--;
           }
-          return { ...prev, mCache: { spans: newMCacheSpans }, mHeap: { ...prev.mHeap, usedMemory: prev.mHeap.usedMemory + targetSize } };
+          return {
+            ...prev,
+            mCache: { ...prev.mCache, spans: newCacheSpans },
+            mHeap: { ...prev.mHeap, activeObjectMemory: prev.mHeap.activeObjectMemory + size }
+          };
         });
+        await sleep(600);
       }
     }
 
-    await sleep(400);
     setActiveStep(null);
     setActiveSizeClass(null);
-    setCurrentEvent(null);
     setIsAllocating(false);
+    setCurrentEvent(null);
   };
 
   const analyzeAndRun = async () => {
     if (isAnalyzing || isAllocating) return;
     setIsAnalyzing(true);
     setState(INITIAL_STATE);
-    addLog(`[AI] 启动编译器语义分析...`);
+    addLog(`[AI] 启动编译器逃逸分析...`);
     
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `你是一个 Go 语言专家。分析代码，识别变量分配。
-        
-        输出要求：
-        1. name: 变量名。
-        2. reason: 详细分配逻辑解释。
-        3. location: 'data' (包级全局), 'stack' (局部非逃逸), 'heap' (逃逸/过大)。
-        4. escapes: 只有 location 为 'heap' 时为 true。
-        5. size: 估计大小。
-        6. type: 类型。
-
-        代码:
-        ${code}`,
+        contents: `分析代码，识别变量分配逻辑。输出 JSON 数组：name, size, hasPointer, location, escapes, reason, type。代码:\n${code}`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -226,9 +227,9 @@ const App: React.FC = () => {
       const events: AllocEvent[] = JSON.parse(response.text);
       for (const event of events) {
         await runAllocationAction(event);
-        await sleep(500);
+        await sleep(300);
       }
-      addLog(`[SUCCESS] 分析与模拟流执行完毕。`);
+      addLog(`[DONE] 模拟流程全部完成。`);
     } catch (error) {
       addLog(`[ERROR] ${error.message}`);
     } finally {
@@ -244,24 +245,19 @@ const App: React.FC = () => {
           <div className="bg-slate-900 rounded-xl shadow-lg border border-slate-800 p-4 flex flex-col min-h-[50%] relative">
              <div className="flex items-center justify-between mb-3">
               <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                <Code2 size={14} className="text-blue-400" /> Compiler Analysis
+                <Code2 size={14} className="text-blue-400" /> Compiler Stage
               </h2>
-              <button onClick={() => setState(INITIAL_STATE)} className="text-slate-500 hover:text-white transition-colors"><Trash2 size={14} /></button>
             </div>
             <textarea value={code} onChange={(e) => setCode(e.target.value)} spellCheck={false} className="flex-1 bg-slate-950 text-blue-100 font-mono text-[13px] p-4 rounded-lg border border-slate-800 resize-none leading-relaxed" />
-            <button onClick={analyzeAndRun} disabled={isAnalyzing || isAllocating} className="mt-4 w-full bg-blue-600 hover:bg-blue-700 text-white py-4 rounded-lg font-bold flex items-center justify-center gap-2 shadow-xl transition-all active:scale-95">
-              {isAnalyzing ? <Loader2 size={18} className="animate-spin" /> : <Sparkles size={18} />} 内存模拟
+            <button onClick={analyzeAndRun} disabled={isAnalyzing || isAllocating} className="mt-4 w-full bg-blue-600 hover:bg-blue-700 text-white py-4 rounded-lg font-bold flex items-center justify-center gap-2 shadow-xl transition-all">
+              {isAnalyzing ? <Loader2 size={18} className="animate-spin" /> : <Sparkles size={18} />} 运行模拟
             </button>
             {currentEvent && (
-              <div className="absolute bottom-20 left-4 right-4 bg-blue-600 text-white p-3 rounded-lg shadow-2xl z-20 border border-blue-400 animate-in slide-in-from-bottom-2">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-[10px] font-black uppercase opacity-70 tracking-tighter">
-                    {currentEvent.location === 'data' ? 'Global Variable' : currentEvent.escapes ? 'Heap Escape' : 'Stack Local'}
-                  </span>
-                  <Zap size={14} className={currentEvent.location === 'data' ? "text-amber-300 fill-amber-300" : currentEvent.escapes ? "text-orange-300 fill-orange-300" : "text-emerald-300 fill-emerald-300"} />
+              <div className="absolute bottom-20 left-4 right-4 bg-slate-800 text-white p-4 rounded-xl shadow-2xl z-20 border border-blue-500/50">
+                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
+                  <div>变量: <span className="text-blue-300">{currentEvent.name}</span></div>
+                  <div>规格: <span className="text-emerald-400">{currentEvent.classSize}B</span></div>
                 </div>
-                <p className="text-sm font-bold truncate">{currentEvent.name}</p>
-                <p className="text-[9px] mt-1 opacity-80 leading-tight">{currentEvent.reason}</p>
               </div>
             )}
           </div>
