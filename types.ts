@@ -2,20 +2,21 @@
 export type ObjectSize = number;
 
 export enum AllocStrategy {
-  STACK = 'STACK', // 栈分配（未逃逸）
+  STACK = 'STACK',
   TINY = 'TINY',
   SMALL = 'SMALL',
-  LARGE = 'LARGE'
+  LARGE = 'LARGE',
+  DATA = 'DATA' // 静态数据段
 }
 
 export interface AllocEvent {
   size: number;
   hasPointer: boolean;
-  name: string;   // 变量名 (用于 UI 展示)
-  reason: string; // 详细原因 (用于日志打印)
-  type: 'slice' | 'map' | 'struct' | 'array' | 'primitive' | 'channel' | 'other';
-  escapes: boolean; // 是否逃逸到堆
-  line?: number;
+  name: string;
+  reason: string;
+  type: string;
+  escapes: boolean;
+  location: 'stack' | 'heap' | 'data'; // 新增位置标识
 }
 
 export interface MSpan {
@@ -50,6 +51,7 @@ export interface AllocatorState {
   mHeap: MHeap;
   logs: string[];
   stackObjects: { id: string; name: string; size: number }[];
+  staticObjects: { id: string; name: string; size: number }[]; // 新增：全局变量存储
 }
 
 export const SIZE_CLASSES = [

@@ -29,21 +29,27 @@ const LogPanel: React.FC<LogPanelProps> = ({ logs }) => {
         className="flex-1 overflow-y-auto p-4 space-y-2 font-mono scrollbar-thin scrollbar-thumb-slate-700 scroll-smooth"
       >
         {logs.map((log, i) => {
-            const isRequest = log.startsWith('->');
             const isAI = log.includes('[AI]');
-            const isSuccess = log.includes('[Success]') || log.includes('[Final]');
-            const isStrategy = log.includes('[Strategy]');
+            const isSuccess = log.includes('[SUCCESS]') || log.includes('[Final]');
+            const isAllocatorStack = log.includes('[ALLOCATOR: STACK]');
+            const isAllocatorData = log.includes('[ALLOCATOR: DATA SEGMENT]');
+            const isAllocatorHeap = log.includes('[ALLOCATOR: MCACHE]') || log.includes('[ALLOCATOR: MCENTRAL]') || log.includes('[ALLOCATOR: MHEAP]');
+            const isCompiler = log.includes('[COMPILER]');
+            const isTransition = log.includes('[TRANSITION]');
             
             return (
-                <div key={i} className={`text-[11px] leading-relaxed animate-in fade-in slide-in-from-bottom-1 duration-300
-                    ${isRequest ? 'text-blue-400 font-bold border-l-2 border-blue-500 pl-2 mt-2' : 
-                      isAI ? 'text-purple-400 flex items-center gap-2' :
+                <div key={i} className={`text-[10px] leading-relaxed animate-in fade-in slide-in-from-bottom-1 duration-300
+                    ${isAI ? 'text-purple-400 flex items-center gap-2' :
                       isSuccess ? 'text-emerald-400 font-bold' : 
-                      isStrategy ? 'text-blue-300 italic' :
+                      isAllocatorStack ? 'text-emerald-400 border-l-2 border-emerald-500/50 pl-2' :
+                      isAllocatorData ? 'text-amber-400 border-l-2 border-amber-500/50 pl-2' :
+                      isAllocatorHeap ? 'text-blue-300 border-l-2 border-blue-400/50 pl-2' :
+                      isCompiler ? 'text-slate-400 italic' :
+                      isTransition ? 'text-orange-400 font-bold' :
                       'text-slate-500'}
                 `}>
                     {isAI && <BrainCircuit size={10} />}
-                    <span className="opacity-40 mr-2 text-[9px]">[{new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}]</span>
+                    <span className="opacity-30 mr-2 text-[8px] tracking-tighter">[{new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}]</span>
                     {log}
                 </div>
             );

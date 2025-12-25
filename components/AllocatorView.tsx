@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { Layers, Server, Globe, Zap, ArrowDownFromLine, ArrowDownNarrowWide, Package } from 'lucide-react';
+import { Layers, Server, Globe, Zap, ArrowDownFromLine, ArrowDownNarrowWide, Package, Box } from 'lucide-react';
 import { AllocatorState, SIZE_CLASSES } from '../types';
 
 interface AllocatorViewProps {
@@ -15,6 +15,36 @@ const AllocatorView: React.FC<AllocatorViewProps> = ({ state, activeStep, active
   return (
     <div className="h-full flex flex-col gap-3 overflow-hidden">
       
+      {/* 0. Data Segment Section (New) */}
+      <section className={`flex-none transition-all duration-300 rounded-2xl p-4 border-2 ${activeStep === 'data' ? 'bg-amber-50 border-amber-500 shadow-lg scale-[1.01]' : 'bg-slate-50 border-slate-200'}`}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Box size={18} className="text-amber-600" />
+            <h3 className="font-black text-slate-700 uppercase tracking-tight text-xs">Static Data Segment (.data / .bss)</h3>
+          </div>
+          <div className="text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded uppercase tracking-tighter">
+            Global Persistence
+          </div>
+        </div>
+        
+        <div className="flex gap-2 min-h-[50px] items-center overflow-x-auto pb-1 no-scrollbar">
+          {state.staticObjects.map((obj, i) => (
+            <div key={i} className="flex-none bg-white border-2 border-amber-500 px-4 py-2 rounded-xl shadow-sm animate-in zoom-in-90 flex flex-col items-center justify-center min-w-[80px] hover:shadow-md transition-shadow">
+               <span className="text-sm font-black text-amber-800 leading-none">{obj.name}</span>
+               <span className="text-[10px] text-amber-400 font-mono mt-1 font-bold">{obj.size}B</span>
+            </div>
+          ))}
+          {activeStep === 'data' && (
+            <div className="flex-none bg-amber-100 w-24 h-12 rounded-xl animate-pulse border-2 border-dashed border-amber-400 flex items-center justify-center">
+              <span className="text-amber-600 text-[10px] font-black uppercase">Binding...</span>
+            </div>
+          )}
+          {state.staticObjects.length === 0 && !activeStep && (
+            <div className="text-slate-400 text-[10px] italic py-3 ml-2">No global variables.</div>
+          )}
+        </div>
+      </section>
+
       {/* 1. Stack Section */}
       <section className={`flex-none transition-all duration-300 rounded-2xl p-4 border-2 ${activeStep === 'stack' ? 'bg-emerald-50 border-emerald-500 shadow-lg scale-[1.01]' : 'bg-slate-50 border-slate-200'}`}>
         <div className="flex items-center justify-between mb-3">
@@ -22,8 +52,8 @@ const AllocatorView: React.FC<AllocatorViewProps> = ({ state, activeStep, active
             <ArrowDownFromLine size={18} className="text-emerald-600" />
             <h3 className="font-black text-slate-700 uppercase tracking-tight text-xs">Goroutine Stack (Thread Local)</h3>
           </div>
-          <div className="flex gap-2 text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded">
-            INITIAL: 2KB
+          <div className="flex gap-2 text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded uppercase tracking-tighter">
+            LIFO / NO GC
           </div>
         </div>
         
@@ -36,11 +66,11 @@ const AllocatorView: React.FC<AllocatorViewProps> = ({ state, activeStep, active
           ))}
           {activeStep === 'stack' && (
             <div className="flex-none bg-emerald-100 w-24 h-12 rounded-xl animate-pulse border-2 border-dashed border-emerald-400 flex items-center justify-center">
-              <span className="text-emerald-600 text-[10px] font-black">NEW OBJECT</span>
+              <span className="text-emerald-600 text-[10px] font-black uppercase">Pushing...</span>
             </div>
           )}
           {state.stackObjects.length === 0 && !activeStep && (
-            <div className="text-slate-400 text-[10px] italic py-3 ml-2">Stack is empty. Local variables will appear here.</div>
+            <div className="text-slate-400 text-[10px] italic py-3 ml-2">Stack is empty.</div>
           )}
         </div>
       </section>
@@ -58,7 +88,7 @@ const AllocatorView: React.FC<AllocatorViewProps> = ({ state, activeStep, active
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Layers size={18} className="text-blue-500" />
-            <h3 className="font-black text-slate-700 uppercase tracking-tight text-xs">MCache (Thread Local Cache)</h3>
+            <h3 className="font-black text-slate-700 uppercase tracking-tight text-xs">MCache (Thread Local Allocator)</h3>
           </div>
           {activeStep === 'refill-mcache' && (
             <div className="flex items-center gap-1.5 text-blue-600 text-[10px] font-black animate-pulse bg-blue-50 px-3 py-1 rounded-full border border-blue-100">
@@ -104,14 +134,14 @@ const AllocatorView: React.FC<AllocatorViewProps> = ({ state, activeStep, active
         </div>
       </section>
 
-      {/* 3. MCentral Section - Redesigned to match MCache layout */}
+      {/* 3. MCentral Section */}
       <section className={`flex-none transition-all duration-300 rounded-2xl bg-slate-50/50 p-5 border-2 border-transparent ${activeStep?.includes('mcentral') ? 'border-orange-500 bg-white shadow-xl scale-[1.01]' : 'border-slate-100'}`}>
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Server size={18} className="text-orange-500" />
             <h3 className="font-black text-slate-700 uppercase tracking-tight text-xs">MCentral (Global Shared Pool)</h3>
           </div>
-          <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Available Spans per Size Class</div>
+          <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Available Spans</div>
         </div>
         
         <div className="grid grid-cols-4 sm:grid-cols-8 gap-3">
@@ -133,11 +163,6 @@ const AllocatorView: React.FC<AllocatorViewProps> = ({ state, activeStep, active
                     <div className="flex items-center gap-1">
                         <span className={`text-xs font-black ${spanCount > 0 ? 'text-orange-600' : 'text-slate-300'}`}>{spanCount}</span>
                         <Package size={10} className={`${spanCount > 0 ? 'text-orange-400' : 'text-slate-200'}`} />
-                    </div>
-                    <div className="mt-1 flex gap-0.5">
-                        {[...Array(Math.min(spanCount, 4))].map((_, i) => (
-                            <div key={i} className={`w-1 h-1.5 rounded-full ${isActive && activeStep === 'refill-mcache' && i === 0 ? 'bg-blue-500 animate-bounce' : 'bg-orange-300'}`} />
-                        ))}
                     </div>
                 </div>
               </div>

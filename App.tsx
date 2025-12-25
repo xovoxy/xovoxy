@@ -12,24 +12,20 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const DEFAULT_CODE = `package main
 
-func main() {
-    // 1. 栈分配: 局部变量，生命周期仅在函数内
-    var x int = 10 
-    
-    // 2. 堆分配 (逃逸): 返回局部变量的地址
-    p := escapeMe()
+var globalVar int = 100 // 全局变量，在静态数据段
 
-    // 3. 堆分配 (大对象): 超过栈预设上限
-    big := make([]int, 10000)
+func main() {
+    localX := 10 // 局部变量，在栈
     
-    _ = x
+    p := escape() // p 逃逸到堆
+    
+    _ = localX
     _ = p
-    _ = big
 }
 
-func escapeMe() *int {
+func escape() *int {
     y := 42
-    return &y // y 逃逸了！
+    return &y
 }`;
 
 const createSpan = (sizeClass: number): MSpan => {
@@ -59,7 +55,8 @@ const INITIAL_STATE: AllocatorState = {
     usedMemory: 1024 * 1024 * 8 
   },
   logs: ['系统准备就绪。', '[Runtime] 初始栈空间 2KB 已就绪。'],
-  stackObjects: []
+  stackObjects: [],
+  staticObjects: []
 };
 
 const App: React.FC = () => {
@@ -80,13 +77,25 @@ const App: React.FC = () => {
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   const runAllocationAction = async (event: AllocEvent) => {
-    const { size, hasPointer, name, reason, type, escapes } = event;
+    const { size, hasPointer, name, reason, type, escapes, location } = event;
     setIsAllocating(true);
     setCurrentEvent(event);
     
-    if (!escapes) {
-      addLog(`[Compiler] 检测到局部变量 "${name}": ${reason}`);
-      addLog(`[Stack] 满足逃逸分析规则，直接在栈(Stack)分配 ${size}B 空间。`);
+    addLog(`[COMPILER] 扫描变量 "${name}" -> 类型: ${type}`);
+
+    if (location === 'data') {
+      addLog(`[ALLOCATOR: DATA SEGMENT] 变量 "${name}" 是全局变量。原因: ${reason}`);
+      addLog(`[ALLOCATOR: DATA SEGMENT] 静态分配至可执行文件的 .data/.bss 段，程序生命周期内常驻。`);
+      setActiveStep('data');
+      setState(prev => ({
+        ...prev,
+        staticObjects: [...prev.staticObjects, { id: Math.random().toString(36).substr(2,4), name: name, size }]
+      }));
+      await sleep(600);
+      setActiveStep(null);
+    } else if (!escapes) {
+      addLog(`[ALLOCATOR: STACK] 变量 "${name}" 属于局部非逃逸变量。原因: ${reason}`);
+      addLog(`[ALLOCATOR: STACK] 在 Goroutine 栈帧中按序压入，无需 GC 处理。`);
       setActiveStep('stack');
       setState(prev => ({
         ...prev,
@@ -95,19 +104,16 @@ const App: React.FC = () => {
       await sleep(600);
       setActiveStep(null);
     } else {
-      addLog(`[Compiler] 检测到变量 "${name}": ${reason} -> 决定逃逸(Escape)`);
+      addLog(`[COMPILER] 变量 "${name}" 触发逃逸: ${reason}`);
+      addLog(`[TRANSITION] 申请堆空间分流...`);
       
       setActiveStep('stack');
-      await sleep(300);
+      await sleep(200);
       setActiveStep('escape-animation');
       await sleep(300);
 
-      let strategy = AllocStrategy.SMALL;
-      if (size > MAX_SMALL_OBJECT) strategy = AllocStrategy.LARGE;
-      else if (size < 16 && !hasPointer) strategy = AllocStrategy.TINY;
-
-      if (strategy === AllocStrategy.LARGE) {
-        addLog(`[Heap] 对象 ${size}B 为大对象 (LargeObject)，直接申请 MHeap Arena 内存。`);
+      if (size > MAX_SMALL_OBJECT) {
+        addLog(`[ALLOCATOR: MHEAP] 变量 "${name}" (${size}B) 为大对象，直通 MHeap Arena。`);
         setActiveStep('mheap');
         await sleep(500);
         setState(prev => ({ ...prev, mHeap: { ...prev.mHeap, usedMemory: prev.mHeap.usedMemory + size } }));
@@ -116,18 +122,18 @@ const App: React.FC = () => {
         const targetSize = SIZE_CLASSES[scIndex];
         setActiveSizeClass(scIndex);
         
-        addLog(`[MCache] 检查本地线程 MCache (SizeClass ${scIndex}, ${targetSize}B)...`);
+        addLog(`[ALLOCATOR: MCACHE] 尝试在 P 的本地 MCache 分配 (SizeClass ${scIndex})。`);
         setActiveStep('mcache');
         await sleep(300);
         
         if (!state.mCache.spans[scIndex] || state.mCache.spans[scIndex]!.freeObjects === 0) {
-          addLog(`[MCache] MCache 为空，向全局中央池 MCentral 发起申请...`);
+          addLog(`[ALLOCATOR: MCACHE] 本地缓存不足，请求 MCentral 批量补充。`);
           setActiveStep('mcentral');
           await sleep(400);
           
           setState(prev => {
             if (prev.mCentrals[scIndex].nonEmptySpans.length === 0) {
-               addLog(`[MCentral] MCentral 亦无可用 Span，向底层 MHeap 批发内存页...`);
+               addLog(`[ALLOCATOR: MCENTRAL] 中央池已干涸，向 MHeap 批发内存页并切割。`);
                const newCentrals = [...prev.mCentrals];
                newCentrals[scIndex] = { ...newCentrals[scIndex], nonEmptySpans: [createSpan(scIndex)] };
                return { ...prev, mCentrals: newCentrals };
@@ -135,7 +141,7 @@ const App: React.FC = () => {
             return prev;
           });
 
-          addLog(`[MCentral] 调度成功：从 MCentral 迁移一个 Span 至本地 MCache。`);
+          addLog(`[ALLOCATOR: MCENTRAL] 成功将一个 MSpan 划拨给 MCache。`);
           setActiveStep('refill-mcache');
           await sleep(300);
           
@@ -151,7 +157,7 @@ const App: React.FC = () => {
           });
         }
 
-        addLog(`[MCache] 分配完成：从可用 Span 槽位中划拨内存。`);
+        addLog(`[ALLOCATOR: MCACHE] 成功获取空闲 Slot，完成分配。`);
         setActiveStep('allocating-slot');
         setState(prev => {
           const newMCacheSpans = [...prev.mCache.spans];
@@ -178,21 +184,23 @@ const App: React.FC = () => {
   const analyzeAndRun = async () => {
     if (isAnalyzing || isAllocating) return;
     setIsAnalyzing(true);
-    addLog(`[AI] 正在分析代码逃逸路径...`);
+    setState(INITIAL_STATE);
+    addLog(`[AI] 启动编译器语义分析...`);
     
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `你是一个 Go 语言专家。分析给定的代码，识别所有的变量分配。
+        contents: `你是一个 Go 语言专家。分析代码，识别变量分配。
         
         输出要求：
-        1. name: 简短的变量名 (例如 "x", "p", "data")，用于 UI 展示。
-        2. reason: 详细的分配逻辑解释 (例如 "局部 int 变量", "闭包引用导致逃逸", "切片过大直接入堆")，用于日志。
-        3. escapes: 变量是否逃逸到堆。
-        4. size: 估计大小。
-        5. type: 类型分类。
+        1. name: 变量名。
+        2. reason: 详细分配逻辑解释。
+        3. location: 'data' (包级全局), 'stack' (局部非逃逸), 'heap' (逃逸/过大)。
+        4. escapes: 只有 location 为 'heap' 时为 true。
+        5. size: 估计大小。
+        6. type: 类型。
 
-        代码如下:
+        代码:
         ${code}`,
         config: {
           responseMimeType: "application/json",
@@ -204,11 +212,12 @@ const App: React.FC = () => {
                 size: { type: Type.INTEGER },
                 hasPointer: { type: Type.BOOLEAN },
                 escapes: { type: Type.BOOLEAN },
+                location: { type: Type.STRING, enum: ['stack', 'heap', 'data'] },
                 name: { type: Type.STRING },
                 reason: { type: Type.STRING },
                 type: { type: Type.STRING }
               },
-              required: ["size", "hasPointer", "escapes", "name", "reason", "type"]
+              required: ["size", "hasPointer", "escapes", "location", "name", "reason", "type"]
             }
           }
         }
@@ -219,9 +228,9 @@ const App: React.FC = () => {
         await runAllocationAction(event);
         await sleep(500);
       }
-      addLog(`[Success] 内存分配流模拟执行完毕。`);
+      addLog(`[SUCCESS] 分析与模拟流执行完毕。`);
     } catch (error) {
-      addLog(`[Error] ${error.message}`);
+      addLog(`[ERROR] ${error.message}`);
     } finally {
       setIsAnalyzing(false);
     }
@@ -246,10 +255,12 @@ const App: React.FC = () => {
             {currentEvent && (
               <div className="absolute bottom-20 left-4 right-4 bg-blue-600 text-white p-3 rounded-lg shadow-2xl z-20 border border-blue-400 animate-in slide-in-from-bottom-2">
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-[10px] font-black uppercase opacity-70 tracking-tighter">{currentEvent.escapes ? 'Escape Detected' : 'Stack Bound'}</span>
-                  <Zap size={14} className={currentEvent.escapes ? "text-orange-300 fill-orange-300" : "text-emerald-300 fill-emerald-300"} />
+                  <span className="text-[10px] font-black uppercase opacity-70 tracking-tighter">
+                    {currentEvent.location === 'data' ? 'Global Variable' : currentEvent.escapes ? 'Heap Escape' : 'Stack Local'}
+                  </span>
+                  <Zap size={14} className={currentEvent.location === 'data' ? "text-amber-300 fill-amber-300" : currentEvent.escapes ? "text-orange-300 fill-orange-300" : "text-emerald-300 fill-emerald-300"} />
                 </div>
-                <p className="text-sm font-bold truncate">Variable: {currentEvent.name}</p>
+                <p className="text-sm font-bold truncate">{currentEvent.name}</p>
                 <p className="text-[9px] mt-1 opacity-80 leading-tight">{currentEvent.reason}</p>
               </div>
             )}
